@@ -36,6 +36,7 @@ module Rmre
       FileUtils.mkdir_p(@output_path) if !Dir.exists?(@output_path)
 
       tables.each do |table_name|
+        puts table_name
         create_model(table_name) if process?(table_name)
       end
     end
@@ -47,6 +48,7 @@ module Rmre
     def create_model(table_name)
       File.open(File.join(output_path, "#{table_name.tableize.singularize}.rb"), "w") do |file|
         constraints = []
+
 
         foreign_keys.each do |fk|
           src = constraint_src(table_name, fk)
@@ -85,7 +87,8 @@ module Rmre
       when 'oracle_enhanced'
         fk = oracle_foreign_keys
       end
-      fk
+      fk.each {|x| x.except!("to_column")}
+      fk.to_ary.uniq
     end
 
     def constraint_src(table_name, fk={})
@@ -104,10 +107,33 @@ module Rmre
     def generate_model_source(table_name, constraints)
       eruby = Erubis::Eruby.new(File.read(File.join(File.expand_path("../", __FILE__), 'model.eruby')))
       eruby.result(:table_name => table_name,
-        :primary_key => connection.primary_key(table_name),
-        :constraints => constraints,
-        :has_type_column => connection.columns(table_name).find { |col| col.name == 'type' })
+                   :primary_key => primary_keys(table_name),
+                   :constraints => constraints,
+                   :has_type_column => connection.columns(table_name).find { |col| col.name == 'type' })
     end
+
+    def primary_keys table_name
+      return psql_primary_keys(table_name) if @connection_options[:adapter].eql?("postgresql")
+      ":#{connection.primary_key table_name}"
+    end
+
+    def psql_primary_keys table_name
+      sql = <<-SQL
+SELECT               
+  pg_attribute.attname 
+FROM pg_index, pg_class, pg_attribute 
+WHERE 
+  pg_class.oid = '#{table_name}'::regclass AND
+  indrelid = pg_class.oid AND
+  pg_attribute.attrelid = pg_class.oid AND 
+  pg_attribute.attnum = any(pg_index.indkey)
+  AND indisprimary
+      SQL
+      keys = connection.select_all(sql).rows
+      return "" if keys.eql? []
+      keys.reduce(:+).map{|x|x.intern}.to_s.gsub("[","").gsub("]","")
+    end
+
 
     def mysql_foreign_keys
       sql = <<-SQL
@@ -120,7 +146,7 @@ from information_schema.KEY_COLUMN_USAGE
 where referenced_table_schema like '%'
  and constraint_schema = '#{@connection_options[:database]}'
  and referenced_table_name is not null
-SQL
+      SQL
       connection.select_all(sql)
     end
 
@@ -146,7 +172,7 @@ SELECT tc.table_name as from_table,
       AND rc.unique_constraint_name = ccu.constraint_name
     WHERE tc.table_name like '%'
     AND tc.constraint_type = 'FOREIGN KEY';
-SQL
+      SQL
       connection.select_all(sql)
     end
 
@@ -171,7 +197,7 @@ FROM   INFORMATION_SCHEMA.TABLE_CONSTRAINTS C
             AND C2.CONSTRAINT_NAME = KCU2.CONSTRAINT_NAME
             AND KCU.ORDINAL_POSITION = KCU2.ORDINAL_POSITION
     WHERE  C.CONSTRAINT_TYPE = 'FOREIGN KEY'
-SQL
+      SQL
       connection.select_all(sql)
     end
 
@@ -180,9 +206,9 @@ SQL
       connection.tables.each do |table|
         connection.foreign_keys(table).each do |oracle_fk|
           table_fk = { 'from_table' => oracle_fk.from_table,
-            'from_column' => oracle_fk.options[:columns][0],
-            'to_table' => oracle_fk.to_table,
-            'to_column' => oracle_fk.options[:references][0] }
+                       'from_column' => oracle_fk.options[:columns][0],
+                       'to_table' => oracle_fk.to_table,
+                       'to_column' => oracle_fk.options[:references][0] }
           fk << table_fk
         end
       end
